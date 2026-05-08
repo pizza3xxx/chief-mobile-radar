@@ -150,7 +150,8 @@ with tab2:
     if st.button("🚀 啟動無人機全域掃描", type="primary", use_container_width=True):
         with st.spinner("🛸 無人機升空中... (約需 5~10 秒)"):
             try:
-                subprocess.run(["python", "drone_scanner.py"], check=True)
+                import sys
+                subprocess.run([sys.executable, "drone_scanner.py"], check=True)
                 st.success("✅ 偵察任務完成！情報已更新。")
             except Exception as e: st.error(f"🚨 無人機升空失敗：{e}")
                 
