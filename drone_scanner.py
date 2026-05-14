@@ -1,4 +1,4 @@
-"""無人機戰略偵察系統 (ETF 航道導引 + 籌碼疊加 + 法人反攻升級版)"""
+"""無人機戰略偵察系統 (ETF 航道導引 + 籌碼疊加 + 法人反攻 + 核心戰區升級版)"""
 
 import os
 import requests
@@ -56,13 +56,12 @@ def fetch_market_targets() -> tuple[dict, list]:
                 if c and n and len(c) == 4 and c.isdigit(): mapping[c] = n
     except: pass
 
-    # 🚀 [改裝點 1] 擴大偵蒐：將 ETF 名單與黃金白名單聯集，確保不漏接任何純基本面護甲目標
+    # 🚀 擴大偵蒐：將 ETF 名單與黃金白名單聯集
     combined_targets = set(ETF_ARMORY.keys()).union(GOLDEN_WHITELIST_CODES)
     target_codes = combined_targets if combined_targets else mapping.keys()
     
     for code in target_codes:
         if code in mapping:
-            # 雙軌代號都加入集束轟炸，yfinance 會自動忽略無效的
             valid_tickers.append(f"{code}.TW")
             valid_tickers.append(f"{code}.TWO")
 
@@ -73,15 +72,17 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
         df = df.dropna(subset=['Close'])
         if len(df) < 20: return None
 
-        # 優先取得代號與護甲狀態，供後續判定使用
         code = ticker.split(".")[0]
         has_armor = code in GOLDEN_WHITELIST_CODES
         etf_list = ETF_ARMORY.get(code, [])
 
+        # === 💎 [新增] 動態辨識：核心戰區 ===
+        # 條件：被 3 檔以上 ETF 納入，或擁有基本面白名單且至少有 1 檔 ETF 護航
+        is_core_warzone = (len(etf_list) >= 3) or (has_armor and len(etf_list) >= 1)
+
         last_close = float(df['Close'].iloc[-1])
         vol_5d_avg = df['Volume'].tail(5).mean()
         
-        # 由於已經有 ETF/基本面護甲，放寬流動性限制至 300 張
         if last_close < 10.0 or vol_5d_avg < 300_000: return None 
 
         seg20 = df.tail(20)
@@ -106,43 +107,45 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
         is_primary = (today_low <= pullback_zone) and (last_close > defense_zone)
         is_standby = not is_primary and ((today_low - pullback_zone) / pullback_zone <= 0.03) and (last_close > defense_zone)
 
-        # === 🚀 [改裝點 2] 換股預警：爆量攻擊偵測 (加入漲幅>2.0%條件，過濾下殺爆量) ===
+        # === 💻 [新增] 核心戰區免死金牌 (季線之上強制留存) ===
+        # 無視 0.382 支撐條件，只要是核心戰區且站穩 60MA，強制保留在監控梯隊
+        is_core_standby = not is_primary and is_core_warzone and (last_close > ma60)
+
+        # === 🚀 換股預警：爆量攻擊偵測 ===
         vol_today = float(df['Volume'].iloc[-1])
         vol_20d_avg = float(df['Volume'].tail(20).mean())
         vol_ratio = vol_today / vol_20d_avg if vol_20d_avg > 0 else 1
         
         is_front_run = (vol_ratio >= 1.5) and (last_close > ma20) and (chg > 2.0)
         
-        # === 🔥 [改裝點 3] 法人反攻 (ETF 豁免權)：抓破底翻與穩健推升，無須爆量 ===
-        # 破底翻：昨日在 20MA 之下，今日強勢站回且漲幅大於 1.5%
+        # === 🔥 法人反攻 (ETF 豁免權)：抓破底翻與穩健推升 ===
         is_break_bottom_up = (prev_close < prev_ma20) and (last_close > ma20) and (chg > 1.5)
-        # 溫和抬轎：被 ETF 納入的權值股，沿 5MA 推升，穩站 20MA 之上，不求爆量
         is_etf_push = (len(etf_list) > 0) and (last_close > ma5) and (last_close > ma20) and (chg > 1.5)
-        
         is_rebound = is_break_bottom_up or is_etf_push
 
-        # 只要符合任一條件，就納入雷達
-        if not (is_primary or is_standby or is_front_run or is_rebound): return None
+        # 只要符合任一條件，就納入雷達 (加入 is_core_standby)
+        if not (is_primary or is_standby or is_core_standby or is_front_run or is_rebound): return None
 
-        # === 🏆 戰術權重評分系統 (含法人籌碼疊加) ===
+        # === 🏆 戰術權重評分系統 ===
         score = 50
         dist_pct = abs(today_low - pullback_zone) / pullback_zone
         score += max(0, 20 - (dist_pct * 100 * 4))
         if ma20 > ma60: score += 10
         if last_close > ma20: score += 5
-        if vol_today < vol_20d_avg: score += 10 # 量縮洗盤加分
+        if vol_today < vol_20d_avg: score += 10
 
-        # 🛡️ 護甲加分
         if has_armor: score += 15
-        
-        # 🧬 ETF 籌碼疊加加分 (每被一檔 ETF 納入 +5 分，上限 20 分)
         etf_multiplier = min(len(etf_list) * 5, 20)
         score += etf_multiplier
+        
+        # 核心重兵額外加權，確保排序靠前
+        if is_core_warzone: score += 10
 
         score = min(99, int(score))
         
         # UI 標籤組裝與狀態分流
         tags_html = ""
+        if is_core_warzone: tags_html += "<span style='color:#00d2d3; font-weight:bold;'>💻核心戰區</span> "
         if has_armor: tags_html += "<span style='color:#06d6a0'>🛡️體質護甲</span> "
         if etf_list: tags_html += f"<span style='color:#c8d4f0'>🛸ETF疊加x{len(etf_list)}</span> "
         
@@ -160,12 +163,15 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
             state_str = "🎯精準打擊"
             css_class = "state-layout"
             category = "primary"
+        elif is_standby or is_core_standby:
+            state_str = "👁️戰略監控"
+            css_class = "state-wait"
+            category = "standby"
         else:
             state_str = "👁️戰略監控"
             css_class = "state-wait"
             category = "standby"
         
-        # 標示出最強護甲
         if has_armor and len(etf_list) >= 2: state_str += " 👑"
 
         etf_str = "、".join([e.split("】")[0].replace("【", "") for e in etf_list]) if etf_list else "無"
@@ -188,7 +194,7 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
 
 def run_scan():
     t0 = time.time()
-    print("🛸 [無人機戰略系統] 啟動 ETF 航道集束轟炸掃描 (法人反攻升級版)...")
+    print("🛸 [無人機戰略系統] 啟動 ETF 航道集束轟炸掃描 (法人反攻 + 核心戰區升級版)...")
     
     mapping, valid_tickers = fetch_market_targets()
     print(f"📡 鎖定戰略兵力總數：{len(valid_tickers)//2} 檔。")
@@ -196,7 +202,6 @@ def run_scan():
     if not valid_tickers: return
 
     try:
-        # 🚀 [改裝點 4] 開啟 auto_adjust=True 還原權值，避開除權息技術面失真陷阱
         df_bulk = yf.download(valid_tickers, period="3mo", group_by='ticker', threads=True, progress=False, auto_adjust=True)
     except Exception as e:
         print(f"🚨 集束下載遭受阻擊：{e}")
@@ -214,7 +219,6 @@ def run_scan():
             
             res = evaluate_local_data(ticker, df_single, name)
             if res:
-                # 避免 .TW 與 .TWO 重複加入
                 if not any(r['code'] == res['code'] for r in results):
                     results.append(res)
 
