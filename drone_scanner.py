@@ -1,4 +1,4 @@
-"""無人機戰略偵察系統 (ETF 航道導引 + 籌碼疊加版)"""
+"""無人機戰略偵察系統 (ETF 航道導引 + 籌碼疊加 + 法人反攻升級版)"""
 
 import os
 import requests
@@ -56,12 +56,13 @@ def fetch_market_targets() -> tuple[dict, list]:
                 if c and n and len(c) == 4 and c.isdigit(): mapping[c] = n
     except: pass
 
-    # 🚀 航道過濾：只鎖定 ETF 星門陣列中存在的標的，大幅減少請求數量！
-    target_codes = ETF_ARMORY.keys() if ETF_ARMORY else mapping.keys()
+    # 🚀 [改裝點 1] 擴大偵蒐：將 ETF 名單與黃金白名單聯集，確保不漏接任何純基本面護甲目標
+    combined_targets = set(ETF_ARMORY.keys()).union(GOLDEN_WHITELIST_CODES)
+    target_codes = combined_targets if combined_targets else mapping.keys()
     
     for code in target_codes:
         if code in mapping:
-            # 這裡簡化處理：為了極速，雙軌代號都加入集束轟炸，yfinance 會自動忽略無效的
+            # 雙軌代號都加入集束轟炸，yfinance 會自動忽略無效的
             valid_tickers.append(f"{code}.TW")
             valid_tickers.append(f"{code}.TWO")
 
@@ -72,10 +73,15 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
         df = df.dropna(subset=['Close'])
         if len(df) < 20: return None
 
+        # 優先取得代號與護甲狀態，供後續判定使用
+        code = ticker.split(".")[0]
+        has_armor = code in GOLDEN_WHITELIST_CODES
+        etf_list = ETF_ARMORY.get(code, [])
+
         last_close = float(df['Close'].iloc[-1])
         vol_5d_avg = df['Volume'].tail(5).mean()
         
-        # 由於已經有 ETF 護航，放寬流動性限制至 300 張
+        # 由於已經有 ETF/基本面護甲，放寬流動性限制至 300 張
         if last_close < 10.0 or vol_5d_avg < 300_000: return None 
 
         seg20 = df.tail(20)
@@ -90,33 +96,41 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
         prev_close = float(df['Close'].iloc[-2])
         chg = (last_close - prev_close) / prev_close * 100 if prev_close else 0.0
 
+        # 取得關鍵均線數據
+        ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
+        ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+        prev_ma20 = float(df['Close'].rolling(20).mean().iloc[-2])
+        ma60 = float(df['Close'].rolling(60).mean().iloc[-1]) if len(df)>=60 else ma20
+
+        # === 🎯 傳統 SOP 陣地 (黃金分割回測) ===
         is_primary = (today_low <= pullback_zone) and (last_close > defense_zone)
         is_standby = not is_primary and ((today_low - pullback_zone) / pullback_zone <= 0.03) and (last_close > defense_zone)
 
-        # === 🚀 換股預警：爆量攻擊偵測 ===
+        # === 🚀 [改裝點 2] 換股預警：爆量攻擊偵測 (加入漲幅>2.0%條件，過濾下殺爆量) ===
         vol_today = float(df['Volume'].iloc[-1])
         vol_20d_avg = float(df['Volume'].tail(20).mean())
         vol_ratio = vol_today / vol_20d_avg if vol_20d_avg > 0 else 1
         
-        is_front_run = vol_ratio >= 1.5 and last_close > float(df['Close'].rolling(20).mean().iloc[-1])
+        is_front_run = (vol_ratio >= 1.5) and (last_close > ma20) and (chg > 2.0)
         
-        # 只要符合 SOP 或是出現爆量預警，就納入雷達
-        if not (is_primary or is_standby or is_front_run): return None
+        # === 🔥 [改裝點 3] 法人反攻 (ETF 豁免權)：抓破底翻與穩健推升，無須爆量 ===
+        # 破底翻：昨日在 20MA 之下，今日強勢站回且漲幅大於 1.5%
+        is_break_bottom_up = (prev_close < prev_ma20) and (last_close > ma20) and (chg > 1.5)
+        # 溫和抬轎：被 ETF 納入的權值股，沿 5MA 推升，穩站 20MA 之上，不求爆量
+        is_etf_push = (len(etf_list) > 0) and (last_close > ma5) and (last_close > ma20) and (chg > 1.5)
+        
+        is_rebound = is_break_bottom_up or is_etf_push
 
-        code = ticker.split(".")[0]
-        has_armor = code in GOLDEN_WHITELIST_CODES
-        etf_list = ETF_ARMORY.get(code, [])
+        # 只要符合任一條件，就納入雷達
+        if not (is_primary or is_standby or is_front_run or is_rebound): return None
 
         # === 🏆 戰術權重評分系統 (含法人籌碼疊加) ===
-        ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-        ma60 = float(df['Close'].rolling(60).mean().iloc[-1]) if len(df)>=60 else ma20
-        
         score = 50
         dist_pct = abs(today_low - pullback_zone) / pullback_zone
         score += max(0, 20 - (dist_pct * 100 * 4))
         if ma20 > ma60: score += 10
         if last_close > ma20: score += 5
-        if vol_today < vol_20d_avg: score += 10 # 量縮洗盤
+        if vol_today < vol_20d_avg: score += 10 # 量縮洗盤加分
 
         # 🛡️ 護甲加分
         if has_armor: score += 15
@@ -127,22 +141,36 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
 
         score = min(99, int(score))
         
-        # UI 標籤組裝
+        # UI 標籤組裝與狀態分流
         tags_html = ""
         if has_armor: tags_html += "<span style='color:#06d6a0'>🛡️體質護甲</span> "
         if etf_list: tags_html += f"<span style='color:#c8d4f0'>🛸ETF疊加x{len(etf_list)}</span> "
-        if is_front_run: tags_html += "<span style='color:#ff6b9d'>🚀抬轎預警</span> "
         
-        etf_str = "、".join([e.split("】")[0].replace("【", "") for e in etf_list]) if etf_list else "無"
-        tooltip = f"戰術評分: {score}分<br>量比: {vol_ratio:.1f}x<br>戰略佈局: {pullback_zone:.2f}<br>防禦: {defense_zone:.2f}<br><br><b>法人航道:</b><br>{etf_str}<br><br>{tags_html}"
-        
-        if is_front_run: state_str = "🚀抬轎預警"
-        elif is_primary: state_str = "🎯精準打擊"
-        else: state_str = "👁️戰略監控"
+        if is_front_run:
+            state_str = "🚀抬轎預警"
+            css_class = "state-bull"
+            category = "primary"
+            tags_html += "<span style='color:#ff6b9d'>🚀抬轎</span> "
+        elif is_rebound:
+            state_str = "🔥法人反攻"
+            css_class = "state-bull"
+            category = "primary"
+            tags_html += "<span style='color:#ff9f43'>🔥反攻</span> "
+        elif is_primary:
+            state_str = "🎯精準打擊"
+            css_class = "state-layout"
+            category = "primary"
+        else:
+            state_str = "👁️戰略監控"
+            css_class = "state-wait"
+            category = "standby"
         
         # 標示出最強護甲
         if has_armor and len(etf_list) >= 2: state_str += " 👑"
 
+        etf_str = "、".join([e.split("】")[0].replace("【", "") for e in etf_list]) if etf_list else "無"
+        tooltip = f"戰術評分: {score}分<br>量比: {vol_ratio:.1f}x<br>戰略佈局: {pullback_zone:.2f}<br>防禦: {defense_zone:.2f}<br><br><b>法人航道:</b><br>{etf_str}<br><br>{tags_html}"
+        
         return {
             "code": code,
             "name": name,
@@ -151,8 +179,8 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
             "score": score,
             "tooltip": tooltip,
             "state_label": state_str,
-            "css_class": "state-bull" if is_front_run else ("state-layout" if is_primary else "state-wait"),
-            "category": "primary" if (is_primary or is_front_run) else "standby"
+            "css_class": css_class,
+            "category": category
         }
 
     except Exception:
@@ -160,15 +188,16 @@ def evaluate_local_data(ticker: str, df: pd.DataFrame, name: str) -> dict:
 
 def run_scan():
     t0 = time.time()
-    print("🛸 [無人機戰略系統] 啟動 ETF 航道集束轟炸掃描...")
+    print("🛸 [無人機戰略系統] 啟動 ETF 航道集束轟炸掃描 (法人反攻升級版)...")
     
     mapping, valid_tickers = fetch_market_targets()
-    print(f"📡 鎖定 ETF 航道兵力總數：{len(valid_tickers)//2} 檔。")
+    print(f"📡 鎖定戰略兵力總數：{len(valid_tickers)//2} 檔。")
     
     if not valid_tickers: return
 
     try:
-        df_bulk = yf.download(valid_tickers, period="3mo", group_by='ticker', threads=True, progress=False, auto_adjust=False)
+        # 🚀 [改裝點 4] 開啟 auto_adjust=True 還原權值，避開除權息技術面失真陷阱
+        df_bulk = yf.download(valid_tickers, period="3mo", group_by='ticker', threads=True, progress=False, auto_adjust=True)
     except Exception as e:
         print(f"🚨 集束下載遭受阻擊：{e}")
         return
@@ -190,7 +219,7 @@ def run_scan():
                     results.append(res)
 
     t1 = time.time()
-    print(f"✅ ETF 航道戰術鑑賞完畢！極速耗時 {t1-t0:.1f} 秒。共鎖定 {len(results)} 檔伏兵。")
+    print(f"✅ 戰術鑑賞完畢！極速耗時 {t1-t0:.1f} 秒。共鎖定 {len(results)} 檔潛力目標。")
 
     if results:
         df_all = pd.DataFrame(results)
@@ -199,11 +228,11 @@ def run_scan():
         df_standby = df_all[df_all['category'] == 'standby']
         df_primary.to_csv("tactical_targets.csv", index=False)
         df_standby.to_csv("tactical_standby.csv", index=False)
-        print(f"📁 情報箱已加密封裝：精準打擊區 {len(df_primary)} 檔，戰略監控區 {len(df_standby)} 檔。")
+        print(f"📁 情報箱已加密封裝：第一梯隊(打擊/反攻/預警) {len(df_primary)} 檔，第二梯隊(監控) {len(df_standby)} 檔。")
     else:
         pd.DataFrame().to_csv("tactical_targets.csv", index=False)
         pd.DataFrame().to_csv("tactical_standby.csv", index=False)
-        print("📁 掃描結束。今日 ETF 航道內無符合 SOP 條件之潛力伏兵。")
+        print("📁 掃描結束。今日航道內無符合戰略條件之目標。")
 
 if __name__ == "__main__":
     run_scan()
